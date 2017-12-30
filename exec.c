@@ -18,8 +18,6 @@
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#ifndef _WIN32
-#endif
 
 #include "qemu/cutils.h"
 #include "cpu.h"
@@ -51,7 +49,6 @@
 #include "trace-root.h"
 
 #ifdef CONFIG_FALLOCATE_PUNCH_HOLE
-#include <fcntl.h>
 #include <linux/falloc.h>
 #endif
 
@@ -410,21 +407,15 @@ static MemoryRegionSection *address_space_lookup_region(AddressSpaceDispatch *d,
 {
     MemoryRegionSection *section = atomic_read(&d->mru_section);
     subpage_t *subpage;
-    bool update;
 
-    if (section && section != &d->map.sections[PHYS_SECTION_UNASSIGNED] &&
-        section_covers_addr(section, addr)) {
-        update = false;
-    } else {
+    if (!section || section == &d->map.sections[PHYS_SECTION_UNASSIGNED] ||
+        !section_covers_addr(section, addr)) {
         section = phys_page_find(d, addr);
-        update = true;
+        atomic_set(&d->mru_section, section);
     }
     if (resolve_subpage && section->mr->subpage) {
         subpage = container_of(section->mr, subpage_t, iomem);
         section = &d->map.sections[subpage->sub_section[SUBPAGE_IDX(addr)]];
-    }
-    if (update) {
-        atomic_set(&d->mru_section, section);
     }
     return section;
 }
@@ -714,9 +705,17 @@ CPUState *qemu_get_cpu(int index)
 }
 
 #if !defined(CONFIG_USER_ONLY)
-void cpu_address_space_init(CPUState *cpu, AddressSpace *as, int asidx)
+void cpu_address_space_init(CPUState *cpu, int asidx,
+                            const char *prefix, MemoryRegion *mr)
 {
     CPUAddressSpace *newas;
+    AddressSpace *as = g_new0(AddressSpace, 1);
+    char *as_name;
+
+    assert(mr);
+    as_name = g_strdup_printf("%s-%d", prefix, cpu->cpu_index);
+    address_space_init(as, mr, as_name);
+    g_free(as_name);
 
     /* Target code should have set num_ases before calling us */
     assert(asidx < cpu->num_ases);
@@ -791,9 +790,15 @@ void cpu_exec_initfn(CPUState *cpu)
 
 void cpu_exec_realizefn(CPUState *cpu, Error **errp)
 {
-    CPUClass *cc ATTRIBUTE_UNUSED = CPU_GET_CLASS(cpu);
+    CPUClass *cc = CPU_GET_CLASS(cpu);
+    static bool tcg_target_initialized;
 
     cpu_list_add(cpu);
+
+    if (tcg_enabled() && !tcg_target_initialized) {
+        tcg_target_initialized = true;
+        cc->tcg_initialize();
+    }
 
 #ifndef CONFIG_USER_ONLY
     if (qdev_get_vmsd(DEVICE(cpu)) == NULL) {
@@ -2354,18 +2359,55 @@ ram_addr_t qemu_ram_addr_from_host(void *ptr)
     return block->offset + offset;
 }
 
+/* Called within RCU critical section. */
+void memory_notdirty_write_prepare(NotDirtyInfo *ndi,
+                          CPUState *cpu,
+                          vaddr mem_vaddr,
+                          ram_addr_t ram_addr,
+                          unsigned size)
+{
+    ndi->cpu = cpu;
+    ndi->ram_addr = ram_addr;
+    ndi->mem_vaddr = mem_vaddr;
+    ndi->size = size;
+    ndi->locked = false;
+
+    assert(tcg_enabled());
+    if (!cpu_physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
+        ndi->locked = true;
+        tb_lock();
+        tb_invalidate_phys_page_fast(ram_addr, size);
+    }
+}
+
+/* Called within RCU critical section. */
+void memory_notdirty_write_complete(NotDirtyInfo *ndi)
+{
+    if (ndi->locked) {
+        tb_unlock();
+    }
+
+    /* Set both VGA and migration bits for simplicity and to remove
+     * the notdirty callback faster.
+     */
+    cpu_physical_memory_set_dirty_range(ndi->ram_addr, ndi->size,
+                                        DIRTY_CLIENTS_NOCODE);
+    /* we remove the notdirty callback only if the code has been
+       flushed */
+    if (!cpu_physical_memory_is_clean(ndi->ram_addr)) {
+        tlb_set_dirty(ndi->cpu, ndi->mem_vaddr);
+    }
+}
+
 /* Called within RCU critical section.  */
 static void notdirty_mem_write(void *opaque, hwaddr ram_addr,
                                uint64_t val, unsigned size)
 {
-    bool locked = false;
+    NotDirtyInfo ndi;
 
-    assert(tcg_enabled());
-    if (!cpu_physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
-        locked = true;
-        tb_lock();
-        tb_invalidate_phys_page_fast(ram_addr, size);
-    }
+    memory_notdirty_write_prepare(&ndi, current_cpu, current_cpu->mem_io_vaddr,
+                         ram_addr, size);
+
     switch (size) {
     case 1:
         stb_p(qemu_map_ram_ptr(NULL, ram_addr), val);
@@ -2382,21 +2424,7 @@ static void notdirty_mem_write(void *opaque, hwaddr ram_addr,
     default:
         abort();
     }
-
-    if (locked) {
-        tb_unlock();
-    }
-
-    /* Set both VGA and migration bits for simplicity and to remove
-     * the notdirty callback faster.
-     */
-    cpu_physical_memory_set_dirty_range(ram_addr, size,
-                                        DIRTY_CLIENTS_NOCODE);
-    /* we remove the notdirty callback only if the code has been
-       flushed */
-    if (!cpu_physical_memory_is_clean(ram_addr)) {
-        tlb_set_dirty(current_cpu, current_cpu->mem_io_vaddr);
-    }
+    memory_notdirty_write_complete(&ndi);
 }
 
 static bool notdirty_mem_accepts(void *opaque, hwaddr addr,
@@ -2426,11 +2454,8 @@ static void check_watchpoint(int offset, int len, MemTxAttrs attrs, int flags)
 {
     CPUState *cpu = current_cpu;
     CPUClass *cc = CPU_GET_CLASS(cpu);
-    CPUArchState *env = cpu->env_ptr;
-    target_ulong pc, cs_base;
     target_ulong vaddr;
     CPUWatchpoint *wp;
-    uint32_t cpu_flags;
 
     assert(tcg_enabled());
     if (cpu->watchpoint_hit) {
@@ -2470,8 +2495,8 @@ static void check_watchpoint(int offset, int len, MemTxAttrs attrs, int flags)
                     cpu->exception_index = EXCP_DEBUG;
                     cpu_loop_exit(cpu);
                 } else {
-                    cpu_get_tb_cpu_state(env, &pc, &cs_base, &cpu_flags);
-                    tb_gen_code(cpu, pc, cs_base, cpu_flags, 1);
+                    /* Force execution of one insn next time.  */
+                    cpu->cflags_next_tb = 1 | curr_cflags();
                     cpu_loop_exit_noexc(cpu);
                 }
             }
@@ -2700,6 +2725,37 @@ static uint16_t dummy_section(PhysPageMap *map, FlatView *fv, MemoryRegion *mr)
     return phys_section_add(map, &section);
 }
 
+static void readonly_mem_write(void *opaque, hwaddr addr,
+                               uint64_t val, unsigned size)
+{
+    /* Ignore any write to ROM. */
+}
+
+static bool readonly_mem_accepts(void *opaque, hwaddr addr,
+                                 unsigned size, bool is_write)
+{
+    return is_write;
+}
+
+/* This will only be used for writes, because reads are special cased
+ * to directly access the underlying host ram.
+ */
+static const MemoryRegionOps readonly_mem_ops = {
+    .write = readonly_mem_write,
+    .valid.accepts = readonly_mem_accepts,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = false,
+    },
+};
+
 MemoryRegion *iotlb_to_region(CPUState *cpu, hwaddr index, MemTxAttrs attrs)
 {
     int asidx = cpu_asidx_from_attrs(cpu, attrs);
@@ -2712,7 +2768,8 @@ MemoryRegion *iotlb_to_region(CPUState *cpu, hwaddr index, MemTxAttrs attrs)
 
 static void io_mem_init(void)
 {
-    memory_region_init_io(&io_mem_rom, NULL, &unassigned_mem_ops, NULL, NULL, UINT64_MAX);
+    memory_region_init_io(&io_mem_rom, NULL, &readonly_mem_ops,
+                          NULL, NULL, UINT64_MAX);
     memory_region_init_io(&io_mem_unassigned, NULL, &unassigned_mem_ops, NULL,
                           NULL, UINT64_MAX);
 

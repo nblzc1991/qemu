@@ -6,7 +6,10 @@ BUILD_DIR=$(CURDIR)
 # Before including a proper config-host.mak, assume we are in the source tree
 SRC_PATH=.
 
-UNCHECKED_GOALS := %clean TAGS cscope ctags docker docker-%
+UNCHECKED_GOALS := %clean TAGS cscope ctags dist \
+    html info pdf txt \
+    help check-help \
+    docker docker-% vm-test vm-build-%
 
 # All following code might depend on configuration variables
 ifneq ($(wildcard config-host.mak),)
@@ -18,17 +21,26 @@ git-submodule-update:
 
 .PHONY: git-submodule-update
 
-ifeq (0,$(MAKELEVEL))
-  git_module_status := $(shell \
-    cd '$(SRC_PATH)' && \
-    ./scripts/git-submodule.sh status $(GIT_SUBMODULES); \
-    echo $$?; \
-  )
+git_module_status := $(shell \
+  cd '$(SRC_PATH)' && \
+  GIT="$(GIT)" ./scripts/git-submodule.sh status $(GIT_SUBMODULES); \
+  echo $$?; \
+)
 
 ifeq (1,$(git_module_status))
+ifeq (no,$(GIT_UPDATE))
 git-submodule-update:
 	$(call quiet-command, \
-          (cd $(SRC_PATH) && ./scripts/git-submodule.sh update $(GIT_SUBMODULES)), \
+            echo && \
+            echo "GIT submodule checkout is out of date. Please run" && \
+            echo "  scripts/git-submodule.sh update $(GIT_SUBMODULES)" && \
+            echo "from the source directory checkout $(SRC_PATH)" && \
+            echo && \
+            exit 1)
+else
+git-submodule-update:
+	$(call quiet-command, \
+          (cd $(SRC_PATH) && GIT="$(GIT)" ./scripts/git-submodule.sh update $(GIT_SUBMODULES)), \
           "GIT","$(GIT_SUBMODULES)")
 endif
 endif
@@ -41,7 +53,7 @@ ifneq ($(realpath $(SRC_PATH)),$(realpath .))
 ifneq ($(wildcard $(SRC_PATH)/config-host.mak),)
 $(error This is an out of tree build but your source tree ($(SRC_PATH)) \
 seems to have been used for an in-tree build. You can fix this by running \
-"make distclean && rm -rf *-linux-user *-softmmu" in your source tree)
+"$(MAKE) distclean && rm -rf *-linux-user *-softmmu" in your source tree)
 endif
 endif
 
@@ -220,6 +232,7 @@ KEYCODEMAP_FILES = \
 		 ui/input-keymap-linux-to-qcode.c \
 		 ui/input-keymap-qcode-to-qnum.c \
 		 ui/input-keymap-qnum-to-qcode.c \
+		 ui/input-keymap-qcode-to-linux.c \
 		 $(NULL)
 
 GENERATED_FILES += $(KEYCODEMAP_FILES)
@@ -244,7 +257,7 @@ Makefile: ;
 configure: ;
 
 .PHONY: all clean cscope distclean html info install install-doc \
-	pdf txt recurse-all speed test dist msi FORCE
+	pdf txt recurse-all dist msi FORCE
 
 $(call set-vpath, $(SRC_PATH))
 
@@ -294,7 +307,7 @@ endif
 	    else \
 	      echo "WARNING: $@ out of date.";\
 	    fi; \
-	    echo "Run \"make defconfig\" to regenerate."; \
+	    echo "Run \"$(MAKE) defconfig\" to regenerate."; \
 	    rm $@.tmp; \
 	  fi; \
 	 else \
@@ -382,6 +395,21 @@ subdir-dtc: .git-submodule-status dtc/libfdt dtc/tests
 
 dtc/%: .git-submodule-status
 	mkdir -p $@
+
+# Overriding CFLAGS causes us to lose defines added in the sub-makefile.
+# Not overriding CFLAGS leads to mis-matches between compilation modes.
+# Therefore we replicate some of the logic in the sub-makefile.
+# Remove all the extra -Warning flags that QEMU uses that Capstone doesn't;
+# no need to annoy QEMU developers with such things.
+CAP_CFLAGS = $(patsubst -W%,,$(CFLAGS) $(QEMU_CFLAGS))
+CAP_CFLAGS += -DCAPSTONE_USE_SYS_DYN_MEM
+CAP_CFLAGS += -DCAPSTONE_HAS_ARM
+CAP_CFLAGS += -DCAPSTONE_HAS_ARM64
+CAP_CFLAGS += -DCAPSTONE_HAS_POWERPC
+CAP_CFLAGS += -DCAPSTONE_HAS_X86
+
+subdir-capstone: .git-submodule-status
+	$(call quiet-command,$(MAKE) -C $(SRC_PATH)/capstone CAPSTONE_SHARED=no BUILDDIR="$(BUILD_DIR)/capstone" CC="$(CC)" AR="$(AR)" LD="$(LD)" RANLIB="$(RANLIB)" CFLAGS="$(CAP_CFLAGS)" $(SUBDIR_MAKEFLAGS) $(BUILD_DIR)/capstone/$(LIBCAPSTONE))
 
 $(SUBDIR_RULES): libqemuutil.a $(common-obj-y) $(chardev-obj-y) \
 	$(qom-obj-y) $(crypto-aes-obj-$(CONFIG_USER_ONLY))
@@ -692,10 +720,6 @@ endif
 	$(MAKE) $(SUBDIR_MAKEFLAGS) TARGET_DIR=$$d/ -C $$d $@ || exit 1 ; \
         done
 
-# various test targets
-test speed: all
-	$(MAKE) -C tests/tcg $@
-
 .PHONY: ctags
 ctags:
 	rm -f tags
@@ -913,4 +937,4 @@ ifdef QEMU_GA_MSI_ENABLED
 endif
 	@echo  ''
 endif
-	@echo  '  make V=0|1 [targets] 0 => quiet build (default), 1 => verbose build'
+	@echo  '  $(MAKE) V=0|1 [targets] 0 => quiet build (default), 1 => verbose build'

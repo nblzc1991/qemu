@@ -51,6 +51,8 @@
 #include "hw/i386/apic_internal.h"
 #endif
 
+#include "disas/capstone.h"
+
 
 /* Cache topology CPUID constants: */
 
@@ -345,7 +347,7 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
         .feat_names = {
             "kvmclock", "kvm-nopiodelay", "kvm-mmu", "kvmclock",
             "kvm-asyncpf", "kvm-steal-time", "kvm-pv-eoi", "kvm-pv-unhalt",
-            NULL, NULL, NULL, NULL,
+            NULL, "kvm-pv-tlb-flush", NULL, NULL,
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
@@ -435,9 +437,9 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
     [FEAT_7_0_ECX] = {
         .feat_names = {
             NULL, "avx512vbmi", "umip", "pku",
-            "ospke", NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL,
-            NULL, NULL, "avx512-vpopcntdq", NULL,
+            "ospke", NULL, "avx512vbmi2", NULL,
+            "gfni", "vaes", "vpclmulqdq", "avx512vnni",
+            "avx512bitalg", NULL, "avx512-vpopcntdq", NULL,
             "la57", NULL, NULL, NULL,
             NULL, NULL, "rdpid", NULL,
             NULL, NULL, NULL, NULL,
@@ -2218,7 +2220,7 @@ static void x86_cpu_class_check_missing_features(X86CPUClass *xcc,
 
     if (xcc->kvm_required && !kvm_enabled()) {
         strList *new = g_new0(strList, 1);
-        new->value = g_strdup("kvm");;
+        new->value = g_strdup("kvm");
         *missing_feats = new;
         return;
     }
@@ -3719,10 +3721,6 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
         return;
     }
 
-    if (tcg_enabled()) {
-        tcg_x86_init();
-    }
-
 #ifndef CONFIG_USER_ONLY
     qemu_register_reset(x86_cpu_machine_reset_cb, cpu);
 
@@ -3738,11 +3736,6 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
 
 #ifndef CONFIG_USER_ONLY
     if (tcg_enabled()) {
-        AddressSpace *as_normal = g_new0(AddressSpace, 1);
-        AddressSpace *as_smm = g_new(AddressSpace, 1);
-
-        address_space_init(as_normal, cs->memory, "cpu-memory");
-
         cpu->cpu_as_mem = g_new(MemoryRegion, 1);
         cpu->cpu_as_root = g_new(MemoryRegion, 1);
 
@@ -3757,11 +3750,10 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
                                  get_system_memory(), 0, ~0ull);
         memory_region_add_subregion_overlap(cpu->cpu_as_root, 0, cpu->cpu_as_mem, 0);
         memory_region_set_enabled(cpu->cpu_as_mem, true);
-        address_space_init(as_smm, cpu->cpu_as_root, "CPU");
 
         cs->num_ases = 2;
-        cpu_address_space_init(cs, as_normal, 0);
-        cpu_address_space_init(cs, as_smm, 1);
+        cpu_address_space_init(cs, 0, "cpu-memory", cs->memory);
+        cpu_address_space_init(cs, 1, "cpu-smm", cpu->cpu_as_root);
 
         /* ... SMRAM with higher priority, linked from /machine/smram.  */
         cpu->machine_done.notify = x86_cpu_machine_done;
@@ -4097,6 +4089,24 @@ static bool x86_cpu_has_work(CPUState *cs)
             !(env->hflags & HF_SMM_MASK));
 }
 
+static void x86_disas_set_info(CPUState *cs, disassemble_info *info)
+{
+    X86CPU *cpu = X86_CPU(cs);
+    CPUX86State *env = &cpu->env;
+
+    info->mach = (env->hflags & HF_CS64_MASK ? bfd_mach_x86_64
+                  : env->hflags & HF_CS32_MASK ? bfd_mach_i386_i386
+                  : bfd_mach_i386_i8086);
+    info->print_insn = print_insn_i386;
+
+    info->cap_arch = CS_ARCH_X86;
+    info->cap_mode = (env->hflags & HF_CS64_MASK ? CS_MODE_64
+                      : env->hflags & HF_CS32_MASK ? CS_MODE_32
+                      : CS_MODE_16);
+    info->cap_insn_unit = 1;
+    info->cap_insn_split = 8;
+}
+
 static Property x86_cpu_properties[] = {
 #ifdef CONFIG_USER_ONLY
     /* apic_id = 0 by default for *-user, see commit 9886e834 */
@@ -4216,6 +4226,10 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
 #endif
     cc->cpu_exec_enter = x86_cpu_exec_enter;
     cc->cpu_exec_exit = x86_cpu_exec_exit;
+#ifdef CONFIG_TCG
+    cc->tcg_initialize = tcg_x86_init;
+#endif
+    cc->disas_set_info = x86_disas_set_info;
 
     dc->user_creatable = true;
 }

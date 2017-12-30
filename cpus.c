@@ -1057,13 +1057,22 @@ static void qemu_tcg_destroy_vcpu(CPUState *cpu)
 {
 }
 
+static void qemu_cpu_stop(CPUState *cpu, bool exit)
+{
+    g_assert(qemu_cpu_is_self(cpu));
+    cpu->stop = false;
+    cpu->stopped = true;
+    if (exit) {
+        cpu_exit(cpu);
+    }
+    qemu_cond_broadcast(&qemu_pause_cond);
+}
+
 static void qemu_wait_io_event_common(CPUState *cpu)
 {
     atomic_mb_set(&cpu->thread_kicked, false);
     if (cpu->stop) {
-        cpu->stop = false;
-        cpu->stopped = true;
-        qemu_cond_broadcast(&qemu_pause_cond);
+        qemu_cpu_stop(cpu, false);
     }
     process_queued_cpu_work(cpu);
 }
@@ -1307,6 +1316,7 @@ static void *qemu_tcg_rr_cpu_thread_fn(void *arg)
     CPUState *cpu = arg;
 
     rcu_register_thread();
+    tcg_register_thread();
 
     qemu_mutex_lock_iothread();
     qemu_thread_get_self(cpu->thread);
@@ -1454,6 +1464,7 @@ static void *qemu_tcg_cpu_thread_fn(void *arg)
     g_assert(!use_icount);
 
     rcu_register_thread();
+    tcg_register_thread();
 
     qemu_mutex_lock_iothread();
     qemu_thread_get_self(cpu->thread);
@@ -1608,12 +1619,12 @@ void pause_all_vcpus(void)
 
     qemu_clock_enable(QEMU_CLOCK_VIRTUAL, false);
     CPU_FOREACH(cpu) {
-        cpu->stop = true;
-        qemu_cpu_kick(cpu);
-    }
-
-    if (qemu_in_vcpu_thread()) {
-        cpu_stop_current();
+        if (qemu_cpu_is_self(cpu)) {
+            qemu_cpu_stop(cpu, true);
+        } else {
+            cpu->stop = true;
+            qemu_cpu_kick(cpu);
+        }
     }
 
     while (!all_vcpus_paused()) {
@@ -1664,6 +1675,18 @@ static void qemu_tcg_init_vcpu(CPUState *cpu)
     char thread_name[VCPU_THREAD_NAME_SIZE];
     static QemuCond *single_tcg_halt_cond;
     static QemuThread *single_tcg_cpu_thread;
+    static int tcg_region_inited;
+
+    /*
+     * Initialize TCG regions--once. Now is a good time, because:
+     * (1) TCG's init context, prologue and target globals have been set up.
+     * (2) qemu_tcg_mttcg_enabled() works now (TCG init code runs before the
+     *     -accel flag is processed, so the check doesn't work then).
+     */
+    if (!tcg_region_inited) {
+        tcg_region_inited = 1;
+        tcg_region_init();
+    }
 
     if (qemu_tcg_mttcg_enabled() || !single_tcg_cpu_thread) {
         cpu->thread = g_malloc0(sizeof(QemuThread));
@@ -1764,11 +1787,8 @@ void qemu_init_vcpu(CPUState *cpu)
         /* If the target cpu hasn't set up any address spaces itself,
          * give it the default one.
          */
-        AddressSpace *as = g_new0(AddressSpace, 1);
-
-        address_space_init(as, cpu->memory, "cpu-memory");
         cpu->num_ases = 1;
-        cpu_address_space_init(cpu, as, 0);
+        cpu_address_space_init(cpu, 0, "cpu-memory", cpu->memory);
     }
 
     if (kvm_enabled()) {
@@ -1785,10 +1805,7 @@ void qemu_init_vcpu(CPUState *cpu)
 void cpu_stop_current(void)
 {
     if (current_cpu) {
-        current_cpu->stop = false;
-        current_cpu->stopped = true;
-        cpu_exit(current_cpu);
-        qemu_cond_broadcast(&qemu_pause_cond);
+        qemu_cpu_stop(current_cpu, true);
     }
 }
 

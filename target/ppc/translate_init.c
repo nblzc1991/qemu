@@ -35,6 +35,7 @@
 #include "mmu-book3s-v3.h"
 #include "sysemu/qtest.h"
 #include "qemu/cutils.h"
+#include "disas/capstone.h"
 
 //#define PPC_DUMP_CPU
 //#define PPC_DEBUG_SPR
@@ -176,11 +177,11 @@ static void spr_write_ureg(DisasContext *ctx, int sprn, int gprn)
 #if !defined(CONFIG_USER_ONLY)
 static void spr_read_decr(DisasContext *ctx, int gprn, int sprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_load_decr(cpu_gpr[gprn], cpu_env);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -188,11 +189,11 @@ static void spr_read_decr(DisasContext *ctx, int gprn, int sprn)
 
 static void spr_write_decr(DisasContext *ctx, int sprn, int gprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_store_decr(cpu_env, cpu_gpr[gprn]);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -203,11 +204,11 @@ static void spr_write_decr(DisasContext *ctx, int sprn, int gprn)
 /* Time base */
 static void spr_read_tbl(DisasContext *ctx, int gprn, int sprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_load_tbl(cpu_gpr[gprn], cpu_env);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -215,11 +216,11 @@ static void spr_read_tbl(DisasContext *ctx, int gprn, int sprn)
 
 static void spr_read_tbu(DisasContext *ctx, int gprn, int sprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_load_tbu(cpu_gpr[gprn], cpu_env);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -240,11 +241,11 @@ static void spr_read_atbu(DisasContext *ctx, int gprn, int sprn)
 #if !defined(CONFIG_USER_ONLY)
 static void spr_write_tbl(DisasContext *ctx, int sprn, int gprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_store_tbl(cpu_env, cpu_gpr[gprn]);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -252,11 +253,11 @@ static void spr_write_tbl(DisasContext *ctx, int sprn, int gprn)
 
 static void spr_write_tbu(DisasContext *ctx, int sprn, int gprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_store_tbu(cpu_env, cpu_gpr[gprn]);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -284,11 +285,11 @@ static void spr_read_purr(DisasContext *ctx, int gprn, int sprn)
 /* HDECR */
 static void spr_read_hdecr(DisasContext *ctx, int gprn, int sprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_load_hdecr(cpu_gpr[gprn], cpu_env);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -296,11 +297,11 @@ static void spr_read_hdecr(DisasContext *ctx, int gprn, int sprn)
 
 static void spr_write_hdecr(DisasContext *ctx, int sprn, int gprn)
 {
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_start();
     }
     gen_helper_store_hdecr(cpu_env, cpu_gpr[gprn]);
-    if (ctx->tb->cflags & CF_USE_ICOUNT) {
+    if (tb_cflags(ctx->tb) & CF_USE_ICOUNT) {
         gen_io_end();
         gen_stop_exception(ctx);
     }
@@ -8080,10 +8081,10 @@ static void gen_spr_power8_ebb(CPUPPCState *env)
 /* Virtual Time Base */
 static void gen_spr_vtb(CPUPPCState *env)
 {
-    spr_register(env, SPR_VTB, "VTB",
+    spr_register_kvm(env, SPR_VTB, "VTB",
                  SPR_NOACCESS, SPR_NOACCESS,
                  &spr_read_tbl, SPR_NOACCESS,
-                 0x00000000);
+                 KVM_REG_PPC_VTB, 0x00000000);
 }
 
 static void gen_spr_power8_fscr(CPUPPCState *env)
@@ -8534,6 +8535,7 @@ POWERPC_FAMILY(POWER7)(ObjectClass *oc, void *data)
     pcc->l1_dcache_size = 0x8000;
     pcc->l1_icache_size = 0x8000;
     pcc->interrupts_big_endian = ppc_cpu_interrupts_big_endian_lpcr;
+    pcc->lpcr_pm = LPCR_P7_PECE0 | LPCR_P7_PECE1 | LPCR_P7_PECE2;
 }
 
 static void init_proc_POWER8(CPUPPCState *env)
@@ -8703,6 +8705,8 @@ POWERPC_FAMILY(POWER8)(ObjectClass *oc, void *data)
     pcc->l1_dcache_size = 0x8000;
     pcc->l1_icache_size = 0x8000;
     pcc->interrupts_big_endian = ppc_cpu_interrupts_big_endian_lpcr;
+    pcc->lpcr_pm = LPCR_P8_PECE0 | LPCR_P8_PECE1 | LPCR_P8_PECE2 |
+                   LPCR_P8_PECE3 | LPCR_P8_PECE4;
 }
 
 #ifdef CONFIG_SOFTMMU
@@ -8897,14 +8901,17 @@ POWERPC_FAMILY(POWER9)(ObjectClass *oc, void *data)
     pcc->l1_dcache_size = 0x8000;
     pcc->l1_icache_size = 0x8000;
     pcc->interrupts_big_endian = ppc_cpu_interrupts_big_endian_lpcr;
+    pcc->lpcr_pm = LPCR_PDEE | LPCR_HDEE | LPCR_EEE | LPCR_DEE | LPCR_OEE;
 }
 
 #if !defined(CONFIG_USER_ONLY)
 void cpu_ppc_set_papr(PowerPCCPU *cpu, PPCVirtualHypervisor *vhyp)
 {
+    PowerPCCPUClass *pcc = POWERPC_CPU_GET_CLASS(cpu);
     CPUPPCState *env = &cpu->env;
     ppc_spr_t *lpcr = &env->spr_cb[SPR_LPCR];
     ppc_spr_t *amor = &env->spr_cb[SPR_AMOR];
+    CPUState *cs = CPU(cpu);
 
     cpu->vhyp = vhyp;
 
@@ -8931,8 +8938,7 @@ void cpu_ppc_set_papr(PowerPCCPU *cpu, PPCVirtualHypervisor *vhyp)
     lpcr->default_value &= ~LPCR_RMLS;
     lpcr->default_value |= 1ull << LPCR_RMLS_SHIFT;
 
-    switch (env->mmu_model) {
-    case POWERPC_MMU_3_00:
+    if (env->mmu_model == POWERPC_MMU_3_00) {
         /* By default we choose legacy mode and switch to new hash or radix
          * when a register process table hcall is made. So disable process
          * tables and guest translation shootdown by default
@@ -8946,16 +8952,13 @@ void cpu_ppc_set_papr(PowerPCCPU *cpu, PPCVirtualHypervisor *vhyp)
         } else {
             lpcr->default_value &= ~(LPCR_UPRT | LPCR_GTSE);
         }
-        lpcr->default_value |= LPCR_PDEE | LPCR_HDEE | LPCR_EEE | LPCR_DEE |
-                               LPCR_OEE;
-        break;
-    default:
-        /* P7 and P8 has slightly different PECE bits, mostly because P8 adds
-         * bit 47 and 48 which are reserved on P7. Here we set them all, which
-         * will work as expected for both implementations
-         */
-        lpcr->default_value |= LPCR_P8_PECE0 | LPCR_P8_PECE1 | LPCR_P8_PECE2 |
-                               LPCR_P8_PECE3 | LPCR_P8_PECE4;
+    }
+
+    /* Only enable Power-saving mode Exit Cause exceptions on the boot
+     * CPU. The RTAS command start-cpu will enable them on secondaries.
+     */
+    if (cs == first_cpu) {
+        lpcr->default_value |= pcc->lpcr_pm;
     }
 
     /* We should be followed by a CPU reset but update the active value
@@ -10499,10 +10502,6 @@ static void ppc_cpu_initfn(Object *obj)
         env->sps = (env->mmu_model & POWERPC_MMU_64K) ? defsps_64k : defsps_4k;
     }
 #endif /* defined(TARGET_PPC64) */
-
-    if (tcg_enabled()) {
-        ppc_translate_init();
-    }
 }
 
 static bool ppc_pvr_match_default(PowerPCCPUClass *pcc, uint32_t pvr)
@@ -10516,6 +10515,31 @@ static gchar *ppc_gdb_arch_name(CPUState *cs)
     return g_strdup("powerpc:common64");
 #else
     return g_strdup("powerpc:common");
+#endif
+}
+
+static void ppc_disas_set_info(CPUState *cs, disassemble_info *info)
+{
+    PowerPCCPU *cpu = POWERPC_CPU(cs);
+    CPUPPCState *env = &cpu->env;
+
+    if ((env->hflags >> MSR_LE) & 1) {
+        info->endian = BFD_ENDIAN_LITTLE;
+    }
+    info->mach = env->bfd_mach;
+    if (!env->bfd_mach) {
+#ifdef TARGET_PPC64
+        info->mach = bfd_mach_ppc64;
+#else
+        info->mach = bfd_mach_ppc;
+#endif
+    }
+    info->disassembler_options = (char *)"any";
+    info->print_insn = print_insn_ppc;
+
+    info->cap_arch = CS_ARCH_PPC;
+#ifdef TARGET_PPC64
+    info->cap_mode = CS_MODE_64;
 #endif
 }
 
@@ -10582,7 +10606,11 @@ static void ppc_cpu_class_init(ObjectClass *oc, void *data)
 #ifndef CONFIG_USER_ONLY
     cc->virtio_is_big_endian = ppc_cpu_is_big_endian;
 #endif
-
+#ifdef CONFIG_TCG
+    cc->tcg_initialize = ppc_translate_init;
+#endif
+    cc->disas_set_info = ppc_disas_set_info;
+ 
     dc->fw_name = "PowerPC,UNKNOWN";
 }
 

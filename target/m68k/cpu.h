@@ -182,7 +182,7 @@ void cpu_m68k_set_fpcr(CPUM68KState *env, uint32_t val);
  */
 typedef enum {
     /* Translator only -- use env->cc_op.  */
-    CC_OP_DYNAMIC = -1,
+    CC_OP_DYNAMIC,
 
     /* Each flag bit computed into cc_[xcnvz].  */
     CC_OP_FLAGS,
@@ -322,6 +322,9 @@ void register_m68k_insns (CPUM68KState *env);
 #define TARGET_VIRT_ADDR_SPACE_BITS 32
 
 #define cpu_init(cpu_model) cpu_generic_init(TYPE_M68K_CPU, cpu_model)
+
+#define M68K_CPU_TYPE_SUFFIX "-" TYPE_M68K_CPU
+#define M68K_CPU_TYPE_NAME(model) model M68K_CPU_TYPE_SUFFIX
 
 #define cpu_signal_handler cpu_m68k_signal_handler
 #define cpu_list m68k_cpu_list
